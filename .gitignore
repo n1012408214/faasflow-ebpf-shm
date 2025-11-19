@@ -3,3 +3,9 @@ __pycache__/
 *.asc
 .idea
 tmp/
+# Log files
+log/*.log
+# Large model files (optional, if you want to exclude them)
+*.h5
+# Large video files (optional, if you want to exclude them)
+*.mp4

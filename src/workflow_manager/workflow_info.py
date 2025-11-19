@@ -18,7 +18,7 @@ class WorkflowInfo:
             config_file = os.path.join(path, 'workflow_info.yaml')
             with open(config_file, 'r') as f:
                 data = yaml.safe_load(f)
-            print(data)
+            #print(data)
             workflow_name = data['workflow_name']
             # datas_successors = {}
             # functions_predecessors = {}

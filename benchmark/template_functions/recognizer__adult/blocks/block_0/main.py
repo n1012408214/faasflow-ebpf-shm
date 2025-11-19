@@ -1,10 +1,23 @@
 import numpy as np
 from tensorflow.keras.models import load_model
 from tensorflow.keras.preprocessing import image
+from tensorflow.keras.optimizers import Adam
 import os
 
 model_file_path = '/proxy/resnet50_final_adult.h5'
-model = load_model(model_file_path)
+
+# 自定义优化器处理，兼容旧版本的lr参数
+def custom_objects():
+    def custom_adam(**kwargs):
+        # 将lr参数转换为learning_rate
+        if 'lr' in kwargs:
+            kwargs['learning_rate'] = kwargs.pop('lr')
+        return Adam(**kwargs)
+    
+    return {'Adam': custom_adam}
+
+# 使用自定义对象加载模型
+model = load_model(model_file_path, custom_objects=custom_objects())
 SIZE = (224, 224)
 
 # couchdb_address = 'http://openwhisk:openwhisk@10.2.64.8:5984/'

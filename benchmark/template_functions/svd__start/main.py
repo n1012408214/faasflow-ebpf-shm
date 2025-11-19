@@ -14,6 +14,12 @@ st = time.time()
 Sigma = np.linalg.svd(m, compute_uv=False)
 ed = time.time()
 print(ed - st)
+# 输出结果到Store
+res = np.split(m, 16, axis=0)
+for i, data in enumerate(res):
+    store.post('matrix', data.tobytes(), datatype='octet', serial_num=i)
+
+store.post('save_db', {'st': st, 'ed': ed, 'duration': ed - st}, datatype='json', serial_num=0)
 # ed = time.time()
 # print(ed - st)
 # st = time.time()

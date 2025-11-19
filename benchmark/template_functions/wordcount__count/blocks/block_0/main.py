@@ -2,7 +2,6 @@ import re
 import time
 
 content = store.fetch(['file'])['file']
-
 # st = time.time()
 # count
 res = {}

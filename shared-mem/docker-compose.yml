@@ -1,0 +1,52 @@
+version: '3.8'
+
+services:
+  # Proxy服务
+  proxy:
+    build: .
+    container_name: faasflow-proxy
+    volumes:
+      - /tmp:/tmp  # 共享Unix socket
+      - /dev/shm:/dev/shm  # 共享内存
+    network_mode: host
+    command: ./proxy
+    restart: unless-stopped
+
+  # 函数容器1
+  func1:
+    build: .
+    container_name: faasflow-func1
+    volumes:
+      - /tmp:/tmp  # 共享Unix socket
+      - /dev/shm:/dev/shm  # 共享内存
+    network_mode: host
+    command: ./func_container 1
+    depends_on:
+      - proxy
+    restart: unless-stopped
+
+  # 函数容器2
+  func2:
+    build: .
+    container_name: faasflow-func2
+    volumes:
+      - /tmp:/tmp  # 共享Unix socket
+      - /dev/shm:/dev/shm  # 共享内存
+    network_mode: host
+    command: ./func_container 2
+    depends_on:
+      - proxy
+    restart: unless-stopped
+
+  # 函数容器3
+  func3:
+    build: .
+    container_name: faasflow-func3
+    volumes:
+      - /tmp:/tmp  # 共享Unix socket
+      - /dev/shm:/dev/shm  # 共享内存
+    network_mode: host
+    command: ./func_container 3
+    depends_on:
+      - proxy
+    restart: unless-stopped

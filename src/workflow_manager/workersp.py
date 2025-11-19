@@ -5,9 +5,12 @@ import time
 import gevent
 import gevent.lock
 import gevent.event
-from typing import Dict, List
+import logging
+from typing import Dict, List, Optional
 import couchdb
 import requests
+
+logger = logging.getLogger(__name__)
 from src.workflow_manager.flow_monitor import flow_monitor
 from workflow_info import WorkflowInfo
 from request_info import RequestInfo
@@ -15,6 +18,8 @@ from src.function_manager.function_manager import FunctionManager
 from config import config
 import pykafka
 from src.workflow_manager.repository import Repository
+from src.workflow_manager.shm_utils import FaaSFlowShmManager, is_shm_enabled, get_shm_config, get_global_faasflow_shm_manager
+from src.workflow_manager.simple_perf_logger import start_request_timer, end_request_timer, log_event, log_block_execution, log_data_transfer, log_container_start, log_container_ready
 
 repo = Repository()
 
@@ -76,10 +81,37 @@ class WorkerSPManager:
         self.workflows_state: Dict[str, WorkflowState] = {}
         self.workflows_info = WorkflowInfo.parse(workflows_info_path)
         self.function_manager = FunctionManager(min_port, functions_info_path)
+        # 将工作流管理器传递给FunctionManager
+        self.function_manager.set_workflow_manager(self)
         self.flow_monitor = flow_monitor
         self.incoming_data_queue: List[DataInfo] = []
         self.lock = gevent.lock.BoundedSemaphore()
         self.kafka_client = pykafka.KafkaClient(hosts=config.KAFKA_URL, use_greenlets=True)
+        
+        # 初始化共享内存管理器（统一初始化点）
+        self.shm_manager = None
+        self.shm_enabled = is_shm_enabled()
+        print(f"SHM启用检查: {self.shm_enabled}")
+        if self.shm_enabled:
+            # 获取全局SHM管理器实例并初始化
+            self.shm_manager = get_global_faasflow_shm_manager()
+            if not self.shm_manager.initialized:
+                # 设置配置参数（根据配置选择SHM版本）
+                if getattr(config, 'USE_OPTIMIZED_SHM', False):
+                    self.shm_manager.shm_name = config.OPTIMIZED_SHM_NAME
+                    self.shm_manager.shm_size = config.OPTIMIZED_SHM_SIZE
+                else:
+                    self.shm_manager.shm_name = config.SHM_NAME
+                    self.shm_manager.shm_size = config.SHM_SIZE
+                # 初始化SHM池（Socket服务器已在init_shm_pool中启动）
+                if not self.shm_manager.init_shm_pool():
+                    print("警告: 共享内存初始化失败，将使用HTTP模式")
+                    self.shm_enabled = False
+                else:
+                    print(f"共享内存模式已启用: {get_shm_config()}")
+            else:
+                print(f"共享内存模式已启用（复用现有实例）: {get_shm_config()}")
+        
         gevent.spawn_later(dispatch_interval, self.dispatch_incoming_data)
         # min_port += 5000
 
@@ -169,6 +201,7 @@ class WorkerSPManager:
             while 'VIRTUAL.CNT' not in input_datas:
                 gevent.sleep(0.003)
             input_datas[dest_data_name][data_infos['serial_num']] = data_infos
+            #print('VIRTUAL.CNT:'+str(input_datas['VIRTUAL.CNT']['val']))
             if len(input_datas[dest_data_name]) == input_datas['VIRTUAL.CNT']['val']:
                 # all split data has arrived, then trigger!
                 workflow_state.templates_blocks_input_cnt[dest_template_name][dest_block_name] += 1
@@ -396,7 +429,7 @@ class WorkerSPManager:
         data_name = data.data_name
         data_infos['from_template_name'] = data.template_name
         data_infos['from_block_name'] = data.block_name
-        if data.template_name == 'global_inputs':
+        if data.template_name == '$USER' or data.template_name == 'global_inputs':
             st = time.time()
             global_inputs = workflow_info.data['global_inputs']
             for dest_template_name, dest_template_infos in global_inputs[data_name]['dest'].items():
@@ -524,15 +557,129 @@ class WorkerSPManager:
             else:
                 raise Exception
 
-    def trigger_normal(self, request_id, workflow_name, template_name, block_name, input_datas=None):
+    def trigger_normal(self, request_id, workflow_name, template_name, block_name, input_datas=None, force_http=False):
         if input_datas is None:
             input_datas = self.workflows_state[request_id].templates_blocks_inputDatas[template_name][block_name]
         self.check_input_datas(request_id, workflow_name, template_name, block_name, input_datas)
-        # Todo: the ip address of template_info may be modified.
-        self.function_manager.allocate_block(request_id, workflow_name, template_name,
-                                             self.requests_info[request_id].templates_infos, block_name, input_datas,
-                                             self.workflows_info[workflow_name].templates_infos[template_name][
-                                                 'blocks'][block_name])
+        
+        #print(f"触发block: {template_name}.{block_name}")
+        #print(f"输入数据: {input_datas}")
+        
+        # 记录block执行开始
+        start_time = time.time()
+        log_event(request_id, 'BLOCK_EXECUTION_START', template_name, block_name, None, None)
+        
+        # 检查是否应该使用共享内存传输
+        should_use_shm = self.shm_enabled 
+        #print(f"是否使用共享内存: {should_use_shm}")
+        
+        if should_use_shm:
+            #print(f"使用共享内存模式触发: {template_name}.{block_name}")
+            # SHM模式和HTTP模式使用相同的触发方式，容器端会根据配置选择存储方式
+            self.function_manager.allocate_block(request_id, workflow_name, template_name,
+                                                 self.requests_info[request_id].templates_infos, block_name, input_datas,
+                                                 self.workflows_info[workflow_name].templates_infos[template_name][
+                                                     'blocks'][block_name])
+        else:
+            print(f"使用HTTP模式触发: {template_name}.{block_name}")
+            # Todo: the ip address of template_info may be modified.
+            self.function_manager.allocate_block(request_id, workflow_name, template_name,
+                                                 self.requests_info[request_id].templates_infos, block_name, input_datas,
+                                                 self.workflows_info[workflow_name].templates_infos[template_name][
+                                                     'blocks'][block_name])
+        
+        # 记录block执行结束和耗时
+        end_time = time.time()
+        execution_time = end_time - start_time
+        log_block_execution(request_id, template_name, block_name, execution_time)
+        
+        # 定期清理共享内存（每10次触发清理一次）
+        if hasattr(self, '_trigger_count'):
+            self._trigger_count += 1
+        else:
+            self._trigger_count = 1
+        
+        if self._trigger_count % 10 == 0 and self.shm_enabled and self.shm_manager:
+            #print(f"定期清理共享内存")
+            # 只清理已知存在的包，避免错误
+            # 这里暂时禁用自动清理，避免清理错误
+            pass
+    
+    def should_use_shm_for_block(self, input_datas: dict) -> bool:
+        """判断是否应该为块使用共享内存传输"""
+        if not self.shm_enabled:
+            return False
+        
+        # 检查是否包含共享内存包描述符
+        for data_name, data_info in input_datas.items():
+            if isinstance(data_info, dict) and 'datatype' in data_info:
+                if data_info['datatype'] == 'entity' and 'val' in data_info:
+                    val = data_info['val']
+                    if isinstance(val, str) and 'shm_packet_' in val:
+                        # 包含共享内存包描述符，使用共享内存模式
+                        return True
+        
+        # 检查是否是第一个block（没有共享内存包描述符的输入）
+        # 如果是第一个block，强制使用共享内存模式，这样它的输出才能存储到共享内存
+        has_shm_input = False
+        for data_name, data_info in input_datas.items():
+            if isinstance(data_info, dict) and 'datatype' in data_info:
+                if data_info['datatype'] == 'entity' and 'val' in data_info:
+                    val = data_info['val']
+                    if isinstance(val, str) and 'shm_packet_' in val:
+                        has_shm_input = True
+                        break
+        
+        # 如果没有共享内存输入，检查是否是真正的第一个block
+        if not has_shm_input:
+            # 检查输入数据是否来自全局输入（第一个block的特征）
+            is_first_block = False
+            has_redis_data = False
+            
+            for data_name, data_info in input_datas.items():
+                if isinstance(data_info, dict):
+                    # 检查 from_template_name
+                    if 'from_template_name' in data_info:
+                        if data_info['from_template_name'] in ['global_inputs', '$USER']:
+                            is_first_block = True
+                            break
+                    # 检查 datatype 为 redis_data_ready 表示来自其他block
+                    elif 'datatype' in data_info and data_info['datatype'] == 'redis_data_ready':
+                        # 这是来自其他block的数据，不是第一个block
+                        has_redis_data = True
+                        break
+            
+            # 如果有redis数据，说明是后续block
+            if has_redis_data:
+                print(f"后续block（有redis数据），回退到HTTP模式")
+                return False
+            elif is_first_block:
+                print(f"第一个block，强制使用共享内存模式")
+                return True
+            else:
+                print(f"后续block但无共享内存输入，可能是数据传输问题，回退到HTTP模式")
+                return False
+        
+        # 计算输入数据的总大小
+        total_size = 0
+        for data_name, data_info in input_datas.items():
+            if isinstance(data_info, dict) and 'datatype' in data_info:
+                if data_info['datatype'] == 'entity':
+                    # 实体数据，计算大小
+                    if 'val' in data_info:
+                        val = data_info['val']
+                        if isinstance(val, str):
+                            total_size += len(val.encode('utf-8'))
+                        elif isinstance(val, bytes):
+                            total_size += len(val)
+                        elif isinstance(val, (dict, list)):
+                            total_size += len(str(val).encode('utf-8'))
+                elif data_info['datatype'] == 'disk_data_ready':
+                    # 磁盘数据，假设较大
+                    total_size += 1024 * 1024  # 假设1MB
+        
+        return self.should_use_shm(total_size)
+    
 
     def send_data_remote(self, remote_addr, request_id, workflow_name, template_name, block_name, datas, from_virtual):
         remote_url = 'http://{}:8000/transfer_data'.format(remote_addr)
@@ -543,6 +690,41 @@ class WorkerSPManager:
                 'datas': datas,
                 'from_virtual': from_virtual}
         requests.post(remote_url, json=data)
+    
+    
+    def receive_data_via_shm(self, packet_id: int) -> Optional[tuple]:
+        """通过共享内存接收数据"""
+        if not self.shm_enabled or not self.shm_manager:
+            return None
+        
+        try:
+            result = self.shm_manager.retrieve_workflow_data(packet_id)
+            if result:
+                descriptor, data = result
+                return descriptor, data
+            return None
+        except Exception as e:
+            print(f"通过共享内存接收数据失败: {e}")
+            return None
+    
+    def free_shm_packet(self, packet_id: int) -> bool:
+        """释放共享内存包"""
+        if not self.shm_enabled or not self.shm_manager:
+            return False
+        
+        try:
+            return self.shm_manager.free_packet(packet_id)
+        except Exception as e:
+            print(f"释放共享内存包失败: {e}")
+            return False
+    
+    def should_use_shm(self, data_size: int) -> bool:
+        """判断是否应该使用共享内存传输"""
+        if not self.shm_enabled:
+            return False
+        
+        # 如果数据大小超过阈值，使用共享内存
+        return data_size >= config.SHM_THRESHOLD_SIZE
 
     # def check_runnable(self, state: WorkflowState, workflow_name, function_name):
     #     return state.function_predecessors_cnt[function_name] == len(

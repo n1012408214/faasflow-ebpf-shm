@@ -1,0 +1,67 @@
+version: '3.8'
+
+services:
+  # Proxy服务
+  proxy:
+    build: .
+    container_name: faasflow-proxy
+    network_mode: host
+    ipc: host  # 共享宿主机的IPC命名空间
+    volumes:
+      - /dev/shm:/dev/shm  # 共享共享内存目录
+    command: python3 py_proxy.py
+    restart: unless-stopped
+
+  # 函数容器
+  func-container:
+    build: .
+    container_name: faasflow-func-container
+    network_mode: host
+    ipc: host  # 共享宿主机的IPC命名空间
+    volumes:
+      - /dev/shm:/dev/shm  # 共享共享内存目录
+    command: python3 py_func_container.py
+    restart: unless-stopped
+    depends_on:
+      - proxy
+
+  # Gateway服务
+  gateway:
+    build: .
+    container_name: faasflow-gateway
+    network_mode: host
+    ipc: host  # 共享宿主机的IPC命名空间
+    volumes:
+      - /dev/shm:/dev/shm  # 共享共享内存目录
+    command: python3 py_gateway.py
+    restart: unless-stopped
+    depends_on:
+      - proxy
+      - func-container
+
+  # 测试客户端
+  test-client:
+    build: .
+    container_name: faasflow-test-client
+    network_mode: host
+    ipc: host  # 共享宿主机的IPC命名空间
+    volumes:
+      - /dev/shm:/dev/shm  # 共享共享内存目录
+    command: >
+      sh -c "
+        echo '等待服务启动...' &&
+        sleep 5 &&
+        echo '测试函数1...' &&
+        curl -X POST http://localhost:8080/function/1 -d 'Hello World' &&
+        echo '测试函数2...' &&
+        curl -X POST http://localhost:8080/function/2 -d 'Hello World' &&
+        echo '测试函数3...' &&
+        curl -X POST http://localhost:8080/function/3 -d 'hello world' &&
+        echo '测试函数4...' &&
+        curl -X POST http://localhost:8080/function/4 -d 'Hello World' &&
+        echo '测试函数5...' &&
+        curl -X POST http://localhost:8080/function/5 -d '{\"message\": \"Hello World\"}' &&
+        echo '测试完成'
+      "
+    depends_on:
+      - gateway

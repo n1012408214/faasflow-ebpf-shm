@@ -2,6 +2,7 @@ import time
 
 # st = time.time()
 counts = store.fetch(['counts'])['counts']
+
 # ed = time.time()
 # store.post('fetch_db', {'st': st, 'ed': ed}, debug=True)
 # merge

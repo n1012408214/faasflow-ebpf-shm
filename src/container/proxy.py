@@ -21,6 +21,15 @@ from kafka import KafkaAdminClient
 from kafka.admin.new_topic import NewTopic
 import container_config
 
+# 添加性能记录支持
+try:
+    from simple_perf_logger import log_event, log_block_execution, log_model_load, log_inference, start_request_timer, end_request_timer
+    PERF_LOGGING_AVAILABLE = True
+    print("容器性能记录模块导入成功")
+except ImportError as e:
+    PERF_LOGGING_AVAILABLE = False
+    print(f"警告: 容器性能记录模块不可用: {e}")
+
 proxy = Flask(__name__)
 proxy.status = 'new'
 proxy.debug = False
@@ -141,12 +150,12 @@ def run_block():
     block_inputs = inp['block_inputs']
     block_infos = inp['block_infos']
     chunk_size = inp['chunk_size']
-    # print(request_id + ' ' + block_name + ' ' + 'start', file=sys.stderr)
+    print(request_id + ' ' + block_name + ' ' + 'start', file=sys.stderr)
     start = time.time()
     delay_time = runner.run_block(request_id, workflow_name, template_name, templates_infos, block_name, block_inputs,
                                   block_infos, chunk_size)
     end = time.time()
-    # print(request_id + ' ' + block_name + ' ' + 'end', file=sys.stderr)
+    print(request_id + ' ' + block_name + ' ' + 'end', file=sys.stderr)
     # proxy.status = 'ok'
     return {'duration': end - start, 'delay_time': delay_time}
 

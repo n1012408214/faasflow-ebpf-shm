@@ -17,6 +17,7 @@ from config import config
 from flask import Flask, request
 from src.function_manager.file_controller import file_controller
 from src.function_manager.prefetcher import prefetcher
+from src.workflow_manager.simple_perf_logger import start_request_timer, end_request_timer, log_event, log_data_transfer
 
 app = Flask(__name__)
 
@@ -41,8 +42,8 @@ class Dispatcher:
         self.manager.init_incoming_request(request_id, workflow_name, templates_info)
 
 
-print(config.WORKFLOWS_INFO_PATH)
-print(config.FUNCTIONS_INFO_PATH)
+#print(config.WORKFLOWS_INFO_PATH)
+#print(config.FUNCTIONS_INFO_PATH)
 dispatcher = Dispatcher(config.WORKFLOWS_INFO_PATH, config.FUNCTIONS_INFO_PATH)
 
 gc_interval = 20
@@ -87,24 +88,60 @@ def handle_inter_data_commit():
 
 @app.route('/transfer_data', methods=['POST'])
 def transfer_data():
-    data = request.get_json(force=True, silent=True)
-    from_virtual = None
-    if 'from_virtual' in data:
-        from_virtual = data['from_virtual']
-    dispatcher.receive_incoming_data(data['request_id'], data['workflow_name'], data['template_name'],
-                                     data['block_name'], data['datas'], from_local=False, from_virtual=from_virtual)
-    return json.dumps({'status': 'ok'})
+    try:
+        data = request.get_json(force=True, silent=True)
+        #print(f"收到transfer_data请求: {data}")
+        from_virtual = None
+        if 'from_virtual' in data:
+            from_virtual = data['from_virtual']
+        
+        # 记录数据传输开始
+        request_id = data['request_id']
+        workflow_name = data['workflow_name']
+        template_name = data['template_name']
+        data_size = len(str(data['datas']).encode('utf-8'))  # 估算数据大小
+        
+        start_time = time.time()
+        log_event(request_id, 'DATA_TRANSFER_START', template_name, None, None, data_size)
+        
+        dispatcher.receive_incoming_data(data['request_id'], data['workflow_name'], data['template_name'],
+                                         data['block_name'], data['datas'], from_local=False, from_virtual=from_virtual)
+        
+        # 记录数据传输结束和耗时
+        end_time = time.time()
+        transfer_time = end_time - start_time
+        log_data_transfer(request_id, template_name, data_size, transfer_time)
+        
+        #print(f"transfer_data处理完成: {data['request_id']}")
+        return json.dumps({'status': 'ok'})
+    except Exception as e:
+        print(f"transfer_data处理异常: {e}")
+        return json.dumps({'status': 'error', 'message': str(e)}), 500
 
 
 @app.route('/request_info', methods=['POST'])
 def req():
-    data = request.get_json(force=True, silent=True)
-    # print(data)
-    request_id = data['request_id']
-    workflow_name = data['workflow_name']
-    templates_info = data['templates_info']
-    dispatcher.receive_incoming_request(request_id, workflow_name, templates_info)
-    return json.dumps({'status': 'ok'})
+    try:
+        data = request.get_json(force=True, silent=True)
+        #print(f"收到request_info请求: {data}")
+        request_id = data['request_id']
+        workflow_name = data['workflow_name']
+        templates_info = data['templates_info']
+        
+        # 开始请求计时
+        start_request_timer(request_id, workflow_name)
+        log_event(request_id, 'REQUEST_INFO_RECEIVED', workflow_name, None, None, None)
+        
+        dispatcher.receive_incoming_request(request_id, workflow_name, templates_info)
+        
+        # 记录请求结束
+        end_request_timer(request_id)
+        
+        #print(f"request_info处理完成: {request_id}")
+        return json.dumps({'status': 'ok'})
+    except Exception as e:
+        print(f"request_info处理异常: {e}")
+        return json.dumps({'status': 'error', 'message': str(e)}), 500
 
 
 @app.route('/test_send_data', methods=['POST'])
@@ -119,8 +156,8 @@ def clear():
     file_controller.init(config.FILE_CONTROLLER_PATH)
     prefetcher.init(config.PREFETCH_POOL_PATH)
     global dispatcher
-    dispatcher = Dispatcher(config.WORKFLOWS_INFO_PATH, config.FUNCTIONS_INFO_PATH)
-    time.sleep(10)
+    #dispatcher = Dispatcher(config.WORKFLOWS_INFO_PATH, config.FUNCTIONS_INFO_PATH)
+    # 移除sleep，让gateway能够立即继续
     return json.dumps({'status': 'ok'})
 
 

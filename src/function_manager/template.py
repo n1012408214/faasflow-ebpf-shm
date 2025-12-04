@@ -97,10 +97,10 @@ class Template:
         assert block_name is not None
         res = None
         # self.lock.acquire()
-        print(f"get_idle_container: {len(self.idle_containers)}")
+        #print(f"get_idle_container: {len(self.idle_containers)}")
         if len(self.idle_containers) > 0:
             res = self.idle_containers[-1]
-            print(f"get_idle_container: {res.idle_blocks_cnt}")
+            #print(f"get_idle_container: {res.idle_blocks_cnt}")
             res.idle_blocks_cnt -= 1
             assert res.idle_blocks_cnt >= 0
             if res.idle_blocks_cnt == 0:

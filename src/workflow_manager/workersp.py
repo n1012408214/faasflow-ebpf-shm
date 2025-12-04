@@ -85,6 +85,7 @@ class WorkerSPManager:
         self.function_manager.set_workflow_manager(self)
         self.flow_monitor = flow_monitor
         self.incoming_data_queue: List[DataInfo] = []
+        self.cleaning_requests: set = set()  # 记录正在清理的 request_id，避免重复清理
         self.lock = gevent.lock.BoundedSemaphore()
         self.kafka_client = pykafka.KafkaClient(hosts=config.KAFKA_URL, use_greenlets=True)
         
@@ -401,7 +402,7 @@ class WorkerSPManager:
                         for dest_data_name in dest_block_infos:
                             self.flow_data(request_id, data.workflow_name, dest_template_name, dest_block_name,
                                            dest_data_name, data_infos)
-
+                                           
     def dispatch_incoming_data(self):
         gevent.spawn_later(dispatch_interval, self.dispatch_incoming_data)
         if len(self.incoming_data_queue) > 0:
@@ -457,9 +458,10 @@ class WorkerSPManager:
             for dest_template_name, dest_template_infos in dest.items():
                 if dest_template_name == '$USER':
                     if data_infos['datatype'] != 'metadata':
-                        # Todo: regular clean should be triggered by the gateway
-                        # gevent.spawn_later(5, self.clean_request, request_id)
                         gevent.spawn(self.post_user_data, request_id, data_name, data_infos)
+                        # 延迟清理：工作流完成后清理内存
+                        # 延迟10秒确保所有相关处理都完成
+                        gevent.spawn_later(10, self.clean_request, request_id)
                     continue
                 target_ip = request_info.templates_infos[dest_template_name]['ip']
                 if target_ip == self.host_addr or target_ip == '127.0.0.1':
@@ -481,10 +483,57 @@ class WorkerSPManager:
                         already_transfered_ips.add(target_ip)
                         gevent.spawn(self.send_data_remote, target_ip, request_id, workflow_name, data.template_name,
                                      data.block_name, {data_name: data_infos}, data.from_virtual)
+    
+    def batch_pop_incoming_data(self):
+        """批量取出数据并用协程处理"""
+        # 继续调度下一次
+        gevent.spawn_later(dispatch_interval, self.batch_pop_incoming_data)
+        
+        # 检查队列是否为空
+        if len(self.incoming_data_queue) == 0:
+            return
+        
+        # 自适应批大小
+        queue_len = len(self.incoming_data_queue)
+        print(f"队列长度: {queue_len}")
+        if queue_len < 10:
+            batch_size = queue_len  # 队列小，全部处理
+        elif queue_len < 100:
+            batch_size = 10  # 中等队列
+        else:
+            batch_size = 20  # 大队列，加大批处理
+        
+        # 批量取出数据
+        batch = []
+        for _ in range(min(batch_size, queue_len)):
+            if len(self.incoming_data_queue) > 0:
+                batch.append(self.incoming_data_queue.pop(0))
+            else:
+                break
+        
+        # 如果有数据，用协程处理这批数据
+        if batch:
+            gevent.spawn(self.dispatch_incoming_data, batch)
 
     def clean_request(self, request_id):
-        self.workflows_state.pop(request_id)
-        self.flow_monitor.requests_keys_info.pop(request_id)
+        """清理请求相关的内存数据"""
+        # 避免重复清理
+        if request_id in self.cleaning_requests:
+            return
+        self.cleaning_requests.add(request_id)
+        print(f"清理请求 {request_id}")
+        try:
+            if request_id in self.workflows_state:
+                self.workflows_state.pop(request_id)
+            if request_id in self.flow_monitor.requests_keys_info:
+                self.flow_monitor.requests_keys_info.pop(request_id)
+            if request_id in self.requests_info:
+                self.requests_info.pop(request_id)
+        except Exception as e:
+            print(f"清理请求 {request_id} 时出错: {e}")
+        finally:
+            # 延迟移除标记，避免短时间内重复清理
+            gevent.spawn_later(1, self.cleaning_requests.discard, request_id)
 
     def get_state(self, request_id: str):
         if request_id not in self.workflows_state:
@@ -552,7 +601,8 @@ class WorkerSPManager:
             if datatype == 'NORMAL':
                 self.check_input_db_data(request_id, data_infos)
             elif datatype == 'LIST':
-                for datainfo in data_infos.values():
+                # 创建列表副本以避免在迭代时字典被修改导致的 RuntimeError
+                for datainfo in list(data_infos.values()):
                     self.check_input_db_data(request_id, datainfo)
             else:
                 raise Exception
@@ -581,7 +631,7 @@ class WorkerSPManager:
                                                  self.workflows_info[workflow_name].templates_infos[template_name][
                                                      'blocks'][block_name])
         else:
-            print(f"使用HTTP模式触发: {template_name}.{block_name}")
+            #print(f"使用HTTP模式触发: {template_name}.{block_name}")
             # Todo: the ip address of template_info may be modified.
             self.function_manager.allocate_block(request_id, workflow_name, template_name,
                                                  self.requests_info[request_id].templates_infos, block_name, input_datas,

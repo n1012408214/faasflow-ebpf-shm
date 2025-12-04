@@ -9,7 +9,7 @@ REDIS_HOST = '172.17.0.1'
 REDIS_PORT = 6379
 REDIS_DB = 0
 REMOTE_DB = 'KAFKA'
-ENABLE_SHARED_MEMORY = False  # 是否启用共享内存传输
+ENABLE_SHARED_MEMORY = True  # 是否启用共享内存传输
 USE_OPTIMIZED_SHM = True  # 是否使用优化的SHM方案（idle队列+哈希表）
 
 OPTIMIZED_SHM_SIZE = 5 * 1024 * 1024 * 1024  # 优化SHM大小 (5GB)

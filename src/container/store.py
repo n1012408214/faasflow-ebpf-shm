@@ -597,15 +597,15 @@ class Store:
                 self.handle_switch()
             return
         # print('POST', key, file=sys.stderr)
-        val_db = val
-        if datatype == 'json':
-            val_db = json.dumps(val)
-        size = len(val_db)
-        if size > db_threshold or datatype == 'octet':
-            # print('enter_put_bitdata', time.time() - start, file=sys.stderr)
-            self.put_bigdata(key, val_db, datatype, serial_num)
-        else:
-            self.post_direct_to_host(key, val, datatype, serial_num)
+        #val_db = val
+        #if datatype == 'json':
+        #    val_db = json.dumps(val)
+        #size = len(val_db)
+        #if size > db_threshold or datatype == 'octet':
+        #        # print('enter_put_bitdata', time.time() - start, file=sys.stderr)
+        #    self.put_bigdata(key, val_db, datatype, serial_num)
+        #else:
+        self.post_direct_to_host(key, val, datatype, serial_num)
             # t = threading.Thread(target=self.post_direct_to_host, args=(key, val, datatype, serial_num))
             # self.posting_threads.append(t)
             # t.start()
@@ -725,9 +725,13 @@ class Store:
             return self.fetch_from_redis(data_infos['db_key'])
         elif datatype == 'couch_data_ready':
             return self.fetch_from_couch(data_infos['db_key'])
-        elif datatype == 'json' or datatype == 'octet':
+        elif datatype == 'json' or datatype == 'octet': 
             return data_infos['val']
         elif datatype == 'disk_data_ready':
+            return self.fetch_from_disk(data_infos['db_key'])
+        elif datatype == 'kafka_data_ready':
+            # prefetcher 已经将数据从 Kafka 读取并保存到磁盘
+            # 所以可以直接从磁盘读取，就像 disk_data_ready 一样
             return self.fetch_from_disk(data_infos['db_key'])
         else:
             raise Exception(f"未知数据类型: {datatype}")
@@ -800,28 +804,51 @@ class Store:
 
     def fetch_from_disk(self, key):
         st = time.time()
-        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        s.connect('/proxy/mnt/transfer.sock')
-        request_info = {'db_key': key}
-        s.sendall(bytes(json.dumps(request_info), encoding='UTF-8'))
-        data = []
-        chunk = s.recv(container_config.SOCKET_CHUNK_SIZE)
-        while chunk:
-            data.append(chunk)
-            chunk = s.recv(container_config.SOCKET_CHUNK_SIZE)
-        s.close()
-        data = b''.join(data)
-        ed = time.time()
-        # print('socket fetch from disk', ed - st, file=sys.stderr)
-        self.post_data_fetched_to_host(key)
-        # r = requests.get(disk_reader_url.format('fetch_from_disk'), json={'db_key': key})
-        # t = threading.Thread(target=self.post_data_fetched_to_host, args=(key,))
-        # self.posting_threads.append(t)
-        # t.start()
-        if key[-4:] == 'json':
-            return json.loads(data)
-        else:
-            return data
+        max_retries = 10
+        retry_delay = 0.1  # 100ms
+        
+        for attempt in range(max_retries):
+            try:
+                s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                s.connect('/proxy/mnt/transfer.sock')
+                request_info = {'db_key': key}
+                s.sendall(bytes(json.dumps(request_info), encoding='UTF-8'))
+                data = []
+                chunk = s.recv(container_config.SOCKET_CHUNK_SIZE)
+                while chunk:
+                    data.append(chunk)
+                    chunk = s.recv(container_config.SOCKET_CHUNK_SIZE)
+                s.close()
+                data = b''.join(data)
+                
+                # 如果数据为空，可能是 prefetcher 还没完成，等待后重试
+                if not data:
+                    if attempt < max_retries - 1:
+                        time.sleep(retry_delay)
+                        continue
+                    else:
+                        raise Exception(f"从磁盘读取数据为空: {key} (已重试 {max_retries} 次)")
+                
+                ed = time.time()
+                # print('socket fetch from disk', ed - st, file=sys.stderr)
+                self.post_data_fetched_to_host(key)
+                # r = requests.get(disk_reader_url.format('fetch_from_disk'), json={'db_key': key})
+                # t = threading.Thread(target=self.post_data_fetched_to_host, args=(key,))
+                # self.posting_threads.append(t)
+                # t.start()
+                if key[-4:] == 'json':
+                    try:
+                        return json.loads(data)
+                    except json.JSONDecodeError as e:
+                        raise Exception(f"JSON解析失败: {key}, 数据长度: {len(data)}, 错误: {e}")
+                else:
+                    return data
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    time.sleep(retry_delay)
+                    continue
+                else:
+                    raise Exception(f"从磁盘读取数据失败: {key}, 错误: {e}")
 
     def fetch_from_redis(self, key):
         redis_fetch_start_time = time.time()

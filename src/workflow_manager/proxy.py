@@ -8,6 +8,7 @@ import socket
 import time
 import json
 import sys
+import io
 
 sys.path.append('../../')
 from gevent.pywsgi import WSGIServer
@@ -54,19 +55,37 @@ def regular_clear_gc():
     gc.collect()
 
 
+
 def socket_server():
     s = socket.socket()
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     s.bind(('0.0.0.0', 5999))
     s.listen(100)
+    print("Socket服务器启动，监听端口 5999，使用串行模式处理连接")
     while True:
-        c, addr = s.accept()
-        client_data = c.recv(64 * 1024)
-        c.close()
-        # time.sleep(0.005)
-        data = json.loads(client_data)
-        dispatcher.receive_incoming_data(data['request_id'], data['workflow_name'], data['template_name'],
-                                         data['block_name'], data['datas'], from_local=True)
+        try:
+            c, addr = s.accept()
+            # 循环接收所有数据，直到连接关闭
+            client_data = b''
+            while True:
+                chunk = c.recv(64 * 1024)
+                if not chunk:
+                    break
+                client_data += chunk
+            c.close()
+            
+            # 解析并处理数据
+            if client_data:
+                data = json.loads(client_data)
+                dispatcher.receive_incoming_data(data['request_id'], data['workflow_name'], data['template_name'],
+                                                 data['block_name'], data['datas'], from_local=True)
+        except json.JSONDecodeError as e:
+            print(f"Socket连接 {addr} JSON解析失败: {e}")
+            print(f"接收到的数据长度: {len(client_data) if 'client_data' in locals() else 0}")
+        except Exception as e:
+            print(f"Socket连接 {addr} 处理异常: {e}")
+            import traceback
+            traceback.print_exc()
 
 
 

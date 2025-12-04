@@ -37,7 +37,7 @@ KAFKA_CHUNK_TEST = False
 DISABLE_PRESSURE_AWARE = False
 
 # 共享内存配置
-ENABLE_SHARED_MEMORY = False  # 是否启用共享内存传输（改为False禁用）
+ENABLE_SHARED_MEMORY = True  # 是否启用共享内存传输（改为False禁用）
 USE_OPTIMIZED_SHM = True  # 是否使用优化的SHM方案（idle队列+哈希表，改为False使用旧的Socket方案）
 
 # 优化SHM配置（USE_OPTIMIZED_SHM=True时生效）
